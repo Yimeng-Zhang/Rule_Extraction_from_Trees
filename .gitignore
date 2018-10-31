@@ -1,0 +1,5 @@
+rule_extraction 20181014.py
+__pycache__
+.ipynb_checkpoints
+.gitignore.bak
+history

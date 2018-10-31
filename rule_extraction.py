@@ -1,15 +1,89 @@
+import os
 import sklearn
 from sklearn.tree import _tree
 from warnings import warn
+from sklearn import tree
+import pydotplus
+from sklearn.externals.six import StringIO
 
 from rule import Rule
 
 # 2018.10.14 Created by Eamon.Zhang
 # 2018.10.15 Add rule filtering function, which allows future functions such as prediction based on selected sets of rules
-# 2018.10.15 Warning: DataFrame.Query has a max length limit of 32 to the query string, see https://github.com/PyTables/PyTables/issues/286. 
+# 2018.10.15 Issue: DataFrame.Query has a max length limit of 32 to the query string, see https://github.com/PyTables/PyTables/issues/286. 
 #            will raise error if rules have >32 conditiions. Unsovlebale yet.
+# 2018.10.28 Add tree visualize function. Output the tree structure to images.
 
-def rule_extract(model, x_test, y_test, sort_key=0, recall_min_c1=0., precision_min_c1=0., recall_min_c0=0., precision_min_c0=0.):
+
+
+# 2018.10.28  Visualize a decision tree or trees from ensembles
+def draw_tree(model,outdir,feature_names=None,proportion=True,class_names=['0','1']):
+    """
+    Visualize a decision tree or trees from ensembles
+    Output a jpeg image
+    
+    Parameters
+    ----------
+    model : 
+        训练好的模型
+    outdir:
+        图片输出的路径
+    feature_names：
+        特征名字。默认为None，则输出X1,X2...
+    proportion:
+        输出图中的 value 是对应该节点具体样本量还是样本比例，默认是比例
+    class_names：
+        每个节点预测的类别名称，默认是 ['0','1']
+    
+    """
+    
+    if isinstance(model,(sklearn.tree.tree.DecisionTreeClassifier,sklearn.tree.tree.DecisionTreeRegressor)):
+        dot_data = StringIO()
+        tree.export_graphviz(decision_tree=model,
+                             out_file=dot_data,
+                             filled=True,
+                             rounded=True,
+                             special_characters=True,
+                             feature_names=feature_names,
+                             proportion=proportion,
+                             class_names=class_names)
+    
+        graph = pydotplus.graph_from_dot_data(dot_data.getvalue())
+        # print(graph)
+        outfile = os.path.join(outdir,'DecisionTree.jpeg')
+        graph.write_jpeg(outfile)
+        
+    elif isinstance(model,(sklearn.ensemble.bagging.BaggingClassifier,
+                           sklearn.ensemble.bagging.BaggingRegressor,
+                           sklearn.ensemble.forest.RandomForestClassifier,
+                           sklearn.ensemble.forest.RandomForestRegressor,
+                           sklearn.ensemble.forest.ExtraTreesClassifier,
+                           sklearn.ensemble.forest.ExtraTreeRegressor)):
+        i = 0
+        for estimator in model.estimators_:
+            i += 1
+            dot_data = StringIO()
+            tree.export_graphviz(decision_tree=estimator,
+                             out_file=dot_data,
+                             filled=True,
+                             rounded=True,
+                             special_characters=True,
+                             feature_names=feature_names,
+                             proportion=proportion,
+                             class_names=class_names)
+    
+            graph = pydotplus.graph_from_dot_data(dot_data.getvalue())
+            #print(graph)
+            outfile = os.path.join(outdir,'EnsembleTrees_No%s.jpeg' % str(i))
+            graph.write_jpeg(outfile)
+    else:
+        raise ValueError('Unsupported model type!')
+        return
+        
+
+# 2018.10.15 rule extraction from a tree model with filtering criterions based on recall/precision on a given dataset
+# 2018.10.30 allow extract all paths of a tree with no filtering
+def rule_extract(model, feature_names, x_test=None, y_test=None, sort_key=0, recall_min_c1=0., precision_min_c1=0., recall_min_c0=0., precision_min_c0=0.):
     """
     从 Tree based Algorithm 中提取规则，并在测试集上测试输出准确率/召回率，按条件排序
    
@@ -17,7 +91,10 @@ def rule_extract(model, x_test, y_test, sort_key=0, recall_min_c1=0., precision_
     ----------
     model : 
         用户训练好的模型
-
+        
+    feature_names:
+        特征名称
+        
     x_test : pandas.DataFrame.
         用来测试的样本的特征集
 
@@ -40,7 +117,7 @@ def rule_extract(model, x_test, y_test, sort_key=0, recall_min_c1=0., precision_
 
     Returns
     -------
-    rules_dict:  list of tuples (rule, recall on 0-class, prec on 0-class, recall on 0-class, prec on 0-class, nb).
+    rules_dict:  list of tuples (rule, recall on 1-class, prec on 1-class, recall on 0-class, prec on 0-class, nb).
         从model里提取的规则（必须是支持的模型）。
         规则可以通过筛选条件来精简。
     
@@ -48,49 +125,58 @@ def rule_extract(model, x_test, y_test, sort_key=0, recall_min_c1=0., precision_
     
     rules_dict = {}
     rules_ = []  
+    #feature_names = feature_names if feature_names is not None
+    #                      else ['X' + x for x in np.arange(X.shape[1]).astype(str)]
     
     if isinstance(model,(sklearn.tree.tree.DecisionTreeClassifier,sklearn.tree.tree.DecisionTreeRegressor)):
-        rules_from_tree = _tree_to_rules(model,x_test.columns)
+        rules_from_tree = _tree_to_rules(model,feature_names)
     
         # 加入规则的评估指标:
-        rules_from_tree = [(r, _eval_rule_perf(r, x_test, y_test)) for r in set(rules_from_tree)]
-        rules_ = rules_from_tree
-        
-        # 根据评估指标进行规则筛选
-        rules_dict = _rule_filter(rules_,rules_dict, recall_min_c1, precision_min_c1, recall_min_c0, precision_min_c0)
+        if x_test is None:          
+            rules_from_tree = [(r) for r in set(rules_from_tree)]
+            return rules_from_tree
+        else:
+            rules_from_tree = [(r, _eval_rule_perf(r, x_test, y_test)) for r in set(rules_from_tree)]
+            rules_ = rules_from_tree
             
-        # 按 recall_1 降序排列
-        rules_dict = sorted(rules_dict.items(),
-                             key=lambda x: (x[1][sort_key]), reverse=True)
+            # 根据评估指标进行规则筛选
+            rules_dict = _rule_filter(rules_,rules_dict, recall_min_c1, precision_min_c1, recall_min_c0, precision_min_c0)
+                
+            # 按 recall_1 降序排列
+            rules_dict = sorted(rules_dict.items(),
+                                 key=lambda x: (x[1][sort_key]), reverse=True)           
+            return rules_dict
         
-        return rules_dict
-    
-    
     elif isinstance(model,(sklearn.ensemble.bagging.BaggingClassifier,
                            sklearn.ensemble.bagging.BaggingRegressor,
                            sklearn.ensemble.forest.RandomForestClassifier,
                            sklearn.ensemble.forest.RandomForestRegressor,
                            sklearn.ensemble.forest.ExtraTreesClassifier,
                            sklearn.ensemble.forest.ExtraTreeRegressor)):
-        for estimator in model.estimators_:
-            rules_from_tree = _tree_to_rules(estimator,x_test.columns)
-            # print(len(rules_from_tree))
-            rules_from_tree = [(r, _eval_rule_perf(r, x_test, y_test)) for r in set(rules_from_tree)]
-            rules_ += rules_from_tree
-            
-        
-        # 根据评估指标进行规则筛选
-        rules_dict = _rule_filter(rules_,rules_dict, recall_min_c1, precision_min_c1, recall_min_c0, precision_min_c0)
-            
-        # 按 recall_1 降序排列
-        rules_dict = sorted(rules_dict.items(),
-                             key=lambda x: (x[1][sort_key]), reverse=True)
-        
-        return rules_dict 
+        if x_test is None: 
+            for estimator in model.estimators_:
+                rules_from_tree = _tree_to_rules(estimator,feature_names)
+                rules_from_tree = [(r) for r in set(rules_from_tree)]
+                rules_ += rules_from_tree
+            return rules_
+        else:
+            for estimator in model.estimators_:
+                rules_from_tree = _tree_to_rules(estimator,feature_names)
+                rules_from_tree = [(r, _eval_rule_perf(r, x_test, y_test)) for r in set(rules_from_tree)]
+                rules_ += rules_from_tree
+               
+            # 根据评估指标进行规则筛选
+            rules_dict = _rule_filter(rules_,rules_dict, recall_min_c1, precision_min_c1, recall_min_c0, precision_min_c0)
+                
+            # 按 recall_1 降序排列
+            rules_dict = sorted(rules_dict.items(),
+                                 key=lambda x: (x[1][sort_key]), reverse=True)        
+            return rules_dict 
     
     else:
         raise ValueError('Unsupported algorithm')
         return
+
 
 # 2018.10.15 对规则筛选。目前由于测试集固定，实际上同一条规则的表现不会波动。
 def _rule_filter(rules_,rules_dict,recall_min_c1,precision_min_c1,recall_min_c0,precision_min_c0):
@@ -106,7 +192,7 @@ def _rule_filter(rules_,rules_dict,recall_min_c1,precision_min_c1,recall_min_c0,
             if rule in rules_dict:
                 # update the score to the new mean
                 # Moving Average Calculation
-                e = rules_dict[rule][4] + 1
+                e = rules_dict[rule][4] + 1  # counter
                 d = rules_dict[rule][3] + 1. / e * (
                     score[3] - rules_[rule][3])
                 c = rules_dict[rule][2] + 1. / e * (
@@ -141,6 +227,7 @@ def _eval_rule_perf(rule, X, y):
         用来测试的样本的y标签
         
     """
+   
     detected_index = list(X.query(rule).index)
     # print(detected_index)
     if len(detected_index) <= 0:
@@ -187,8 +274,7 @@ def _tree_to_rules(tree, feature_names):
     tree_ = tree.tree_
     feature_name = [
         feature_names[i] if i != _tree.TREE_UNDEFINED else "undefined!"
-        for i in tree_.feature
-    ]
+        for i in tree_.feature]
     rules = []
 
     def recurse(node, base_name):
