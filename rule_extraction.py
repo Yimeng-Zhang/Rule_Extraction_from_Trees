@@ -5,6 +5,8 @@ from warnings import warn
 from sklearn import tree
 import pydotplus
 from sklearn.externals.six import StringIO
+import numpy as np
+import pandas as pd
 
 from rule import Rule
 
@@ -13,30 +15,33 @@ from rule import Rule
 # 2018.10.15 Issue: DataFrame.Query has a max length limit of 32 to the query string, see https://github.com/PyTables/PyTables/issues/286. 
 #            will raise error if rules have >32 conditiions. Unsovlebale yet.
 # 2018.10.28 Add tree visualize function. Output the tree structure to images.
-
+# 2018.12.15 fix bug on calculating precision on class 0
+# 2018.12.15 add rule voting
 
 
 # 2018.10.28  Visualize a decision tree or trees from ensembles
 def draw_tree(model,outdir,feature_names=None,proportion=True,class_names=['0','1']):
     """
     Visualize a decision tree or trees from ensembles
-    Output a jpeg image
+    and output a jpeg image
     
     Parameters
     ----------
     model : 
-        训练好的模型
+        pre-trained model
     outdir:
-        图片输出的路径
+        output path of the image
     feature_names：
-        特征名字。默认为None，则输出X1,X2...
+        Feature names. If None, returns X1,X2...
     proportion:
-        输出图中的 value 是对应该节点具体样本量还是样本比例，默认是比例
+        the values of the output graph is absolute number of samples belongs to 
+        that node or the proportion. Default is proportion
     class_names：
-        每个节点预测的类别名称，默认是 ['0','1']
+        label of the prediction of each node. Default is ['0','1']
     
     """
     
+    # if input model is a single decision tree/classifier
     if isinstance(model,(sklearn.tree.tree.DecisionTreeClassifier,sklearn.tree.tree.DecisionTreeRegressor)):
         dot_data = StringIO()
         tree.export_graphviz(decision_tree=model,
@@ -52,7 +57,8 @@ def draw_tree(model,outdir,feature_names=None,proportion=True,class_names=['0','
         # print(graph)
         outfile = os.path.join(outdir,'DecisionTree.jpeg')
         graph.write_jpeg(outfile)
-        
+    
+    # if input model is a tree ensemble
     elif isinstance(model,(sklearn.ensemble.bagging.BaggingClassifier,
                            sklearn.ensemble.bagging.BaggingRegressor,
                            sklearn.ensemble.forest.RandomForestClassifier,
@@ -60,6 +66,7 @@ def draw_tree(model,outdir,feature_names=None,proportion=True,class_names=['0','
                            sklearn.ensemble.forest.ExtraTreesClassifier,
                            sklearn.ensemble.forest.ExtraTreeRegressor)):
         i = 0
+        # visulaize each tree from the whole ensemble
         for estimator in model.estimators_:
             i += 1
             dot_data = StringIO()
@@ -85,7 +92,9 @@ def draw_tree(model,outdir,feature_names=None,proportion=True,class_names=['0','
 # 2018.10.30 allow extract all paths of a tree with no filtering
 def rule_extract(model, feature_names, x_test=None, y_test=None, sort_key=0, recall_min_c1=0., precision_min_c1=0., recall_min_c0=0., precision_min_c0=0.):
     """
-    从 Tree based Algorithm 中提取规则，并在测试集上测试输出准确率/召回率，按条件排序
+    Extract rules from Tree based Algorithm and filter rules based 
+    on recall/precision threshold on a given dataset.
+    Return rules and rules with its performance.
    
     Parameters
     ----------
@@ -117,9 +126,11 @@ def rule_extract(model, feature_names, x_test=None, y_test=None, sort_key=0, rec
 
     Returns
     -------
-    rules_dict:  list of tuples (rule, recall on 1-class, prec on 1-class, recall on 0-class, prec on 0-class, nb).
-        从model里提取的规则（必须是支持的模型）。
-        规则可以通过筛选条件来精简。
+    rules: list of str. 
+        eg: ['Fare > 26 and Age > 10','Fare <= 20 and Age <= 18']
+    rules_dict: list of tuples (rule, recall on 1-class, prec on 1-class, recall on 0-class, prec on 0-class, nb).
+        eg:[('Fare > 26 and Age > 10', (0.32, 0.91, 0.97, 0.6, 1)),
+            ('Fare <= 20 and Age <= 18', (0.22, 0.71, 0.17, 0.5, 1))]
     
     """
     
@@ -128,13 +139,15 @@ def rule_extract(model, feature_names, x_test=None, y_test=None, sort_key=0, rec
     #feature_names = feature_names if feature_names is not None
     #                      else ['X' + x for x in np.arange(X.shape[1]).astype(str)]
     
+    # if input model is a single decision tree/classifier
     if isinstance(model,(sklearn.tree.tree.DecisionTreeClassifier,sklearn.tree.tree.DecisionTreeRegressor)):
         rules_from_tree = _tree_to_rules(model,feature_names)
     
-        # 加入规则的评估指标:
+        # if no test data is given, return the rules
         if x_test is None:          
-            rules_from_tree = [(r) for r in set(rules_from_tree)]
-            return rules_from_tree
+            rules_ = [(r) for r in set(rules_from_tree)]
+            return rules_, rules_dict
+        # if test data is given, filter the rules based on precision/recall
         else:
             rules_from_tree = [(r, _eval_rule_perf(r, x_test, y_test)) for r in set(rules_from_tree)]
             rules_ = rules_from_tree
@@ -144,8 +157,9 @@ def rule_extract(model, feature_names, x_test=None, y_test=None, sort_key=0, rec
                 
             # 按 recall_1 降序排列
             rules_dict = sorted(rules_dict.items(),
-                                 key=lambda x: (x[1][sort_key]), reverse=True)           
-            return rules_dict
+                                key=lambda x: (x[1][sort_key]), reverse=True)   
+            rules_= [i[0] for i in rules_dict]
+            return rules_, rules_dict
         
     elif isinstance(model,(sklearn.ensemble.bagging.BaggingClassifier,
                            sklearn.ensemble.bagging.BaggingRegressor,
@@ -158,7 +172,7 @@ def rule_extract(model, feature_names, x_test=None, y_test=None, sort_key=0, rec
                 rules_from_tree = _tree_to_rules(estimator,feature_names)
                 rules_from_tree = [(r) for r in set(rules_from_tree)]
                 rules_ += rules_from_tree
-            return rules_
+            return rules_, rules_dict
         else:
             for estimator in model.estimators_:
                 rules_from_tree = _tree_to_rules(estimator,feature_names)
@@ -166,15 +180,16 @@ def rule_extract(model, feature_names, x_test=None, y_test=None, sort_key=0, rec
                 rules_ += rules_from_tree
                
             # 根据评估指标进行规则筛选
-            rules_dict = _rule_filter(rules_,rules_dict, recall_min_c1, precision_min_c1, recall_min_c0, precision_min_c0)
+            rules_dict = _rule_filter(rules_, rules_dict, recall_min_c1, precision_min_c1, recall_min_c0, precision_min_c0)
                 
             # 按 recall_1 降序排列
             rules_dict = sorted(rules_dict.items(),
-                                 key=lambda x: (x[1][sort_key]), reverse=True)        
-            return rules_dict 
+                                 key=lambda x: (x[1][sort_key]), reverse=True)  
+            rules_= [i[0] for i in rules_dict]
+            return rules_, rules_dict 
     
     else:
-        raise ValueError('Unsupported algorithm')
+        raise ValueError('Unsupported model type!')
         return
 
 
@@ -189,18 +204,19 @@ def _rule_filter(rules_,rules_dict,recall_min_c1,precision_min_c1,recall_min_c0,
     # 根据0/1类样本的recall/precision进行筛选。对于重复出现的规则，则更新其表现。
     for rule, score in rules_:
         if score[0] >= recall_min_c1 and score[1] >= precision_min_c1 and score[2]>=recall_min_c0 and score[3]>=precision_min_c0:
+
             if rule in rules_dict:
                 # update the score to the new mean
                 # Moving Average Calculation
                 e = rules_dict[rule][4] + 1  # counter
                 d = rules_dict[rule][3] + 1. / e * (
-                    score[3] - rules_[rule][3])
+                    score[3] - rules_dict[rule][3])
                 c = rules_dict[rule][2] + 1. / e * (
-                    score[2] - rules_[rule][2])          
+                    score[2] - rules_dict[rule][2])          
                 b = rules_dict[rule][1] + 1. / e * (
-                    score[1] - rules_[rule][1])
+                    score[1] - rules_dict[rule][1])
                 a = rules_dict[rule][0] + 1. / e * (
-                    score[0] - rules_[rule][0])
+                    score[0] - rules_dict[rule][0])
 
                 rules_dict[rule] = (a, b, c, d, e)
             else:
@@ -245,10 +261,11 @@ def _eval_rule_perf(rule, X, y):
 #        recall_1 = str('recall for class 1 is: '+ str(float(true_pos) / pos))
 #        prec_1 = str('prec for class 1 is: ' + str(y_detected.mean()))
     recall_0 = (1- (float(false_pos) /neg))
-    prec_0 = ((neg-false_pos) / (len(y)-y_detected.sum()))
+    prec_0 = ((neg-false_pos) / (len(y)-y_detected.sum()-false_pos))
     recall_1 = (float(true_pos) / pos)
     prec_1 = (y_detected.mean())
-
+    #print(rule)
+    #print(pos,neg,true_pos,false_pos,len(y),y_detected.sum())
     return recall_1, prec_1, recall_0, prec_0
     
     
@@ -257,7 +274,6 @@ def _eval_rule_perf(rule, X, y):
 def _tree_to_rules(tree, feature_names):
     """
     Return a list of rules from a tree
-    从决策树中提取规则
 
     Parameters
     ----------
@@ -299,3 +315,27 @@ def _tree_to_rules(tree, feature_names):
     recurse(0, [])
 
     return rules if len(rules) > 0 else 'True'
+
+# 2018.12.14 added by Eamon.Zhang
+def rules_vote(X,rules):
+    """
+    Score representing a vote of the base classifiers (rules)
+    The score of an input sample is computed as the sum of the binary
+    rules outputs: a score of k means than k rules have voted positively.
+    
+    Parameters
+    ----------
+    X : array-like, shape (n_samples, n_features)
+        The training input samples.
+
+    Returns
+    -------
+    scores : array, shape (n_samples,)
+
+    """
+    scores = np.zeros(X.shape[0])
+    for r in rules:
+        scores[list(X.query(r).index)] +=1 #w[0]
+    scores=pd.DataFrame(scores)
+
+    return scores
